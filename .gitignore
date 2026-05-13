@@ -1,0 +1,18 @@
+# Large data files (download from Zenodo)
+*.h5ad
+
+# Generated PDFs
+*.pdf
+
+# IDE and OS files
+.DS_Store
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Confidential
+*.key
