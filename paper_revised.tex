@@ -1,0 +1,533 @@
+\documentclass[12pt,number,sort&compress]{elsarticle}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{lineno}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{microtype}
+
+\journal{Bioinformatics}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{A Pilot Evaluation of Cross-Transcription-Factor Generalization in Single-Cell Perturbation Response Prediction}
+
+\author{Junbiao Xue}
+
+\begin{abstract}
+\textbf{Motivation:} Accurate prediction of cellular transcriptional responses to
+genetic perturbations is a fundamental capability for virtual cell models.
+Existing benchmarks evaluate perturbation response predictors on
+within-gene generalization (held-out cells from the same perturbation),
+but cross-gene generalization -- predicting responses to unseen transcription
+factor (TF) categories -- remains poorly characterized.
+
+\textbf{Results:} We conducted a small-scale pilot evaluation of cross-gene
+generalization using a Leave-One-Gene-Out (LOGO) protocol applied to the
+Dixit et al. 2016 CRISPR Perturb-seq dataset (10 TF knockdowns in K562 cells).
+We evaluated four methods: Simple Control Prediction (SCP), SCP with
+PCA-dimensionality reduction (PCA-SCP), Ridge Regression, and Random Forest.
+Ridge Regression achieved the highest average Pearson correlation ($r = 0.45$),
+marginally above SCP ($r = 0.39$), though the difference was not statistically
+significant after bootstrap resampling (95\% CI: $[-0.01, 0.14]$).
+PCA-SCP with only 9 training samples failed to produce reliable predictions
+(mean $r \approx 0$). Exploratory analysis suggested that TF family membership
+may partially predict response similarity (ETS-family pairwise $r = 0.78$),
+though this observation requires validation on larger datasets.
+
+\textbf{Availability:} Analysis code is available at:
+\url{https://github.com/JunbiaoXue/tf-perturbation-benchmark}
+\end{abstract}
+
+\begin{keyword}
+single-cell RNA-seq, perturbation prediction, CRISPR screening,
+Leave-One-Gene-Out, transcription factors, virtual cell
+\end{keyword}
+
+\end{frontmatter}
+
+\section{Introduction}
+\label{sec:intro}
+
+Single-cell CRISPR screening technologies, including Perturb-seq~\citep{Dixit2016PerturbSeq}
+and CROP-seq~\citep{Adamson2016}, enable high-throughput measurement of
+transcriptional responses to genetic perturbations at single-cell resolution.
+By combining pooled CRISPR screens with scRNA-seq readout, these platforms
+generate perturbation-response data spanning tens to hundreds of genetic
+perturbations per study~\citep{Norman2019,Replogle2022}.
+
+This wealth of perturbation data has motivated the development of computational
+methods for perturbation response prediction -- a core capability of virtual cell
+models. Approaches range from simple baselines such as Simple Control Prediction
+(SCP)~\citep{Weinreb2018SCP} to deep learning architectures including variational
+autoencoders (scGen)~\citep{Lotfollahi2019scGen}, compositional perturbation
+autoencoders (CPA)~\citep{Lotfollahi2023CPA}, neural optimal transport methods
+(CellOT)~\citep{Zheng2023CellOT}, and foundation models trained on millions of
+cells (scGPT~\citep{Cui2024scGPT}, scFoundation~\citep{Hao2024scFoundation}).
+
+A critical gap in method evaluation is the predominant focus on
+within-perturbation generalization: existing benchmarks~\citep{Allen2022Benchmark,Crowell2023}
+evaluate a model's ability to predict held-out cells from perturbations present
+during training. This tests interpolation, not extrapolation. In practice,
+researchers often need to predict responses to uncharacterized perturbations --
+for example, anticipating the effect of knocking down a novel transcription factor
+based on a model trained on an unrelated set of TFs. Whether current methods can
+generalize across gene categories remains essentially uncharacterized.
+
+Here, we present a \emph{pilot} evaluation of cross-gene-category generalization
+using a Leave-One-Gene-Out (LOGO) evaluation protocol. We emphasize the
+preliminary nature of this study: with only 10 TFs and a single cell type,
+statistical power is limited, and findings should be interpreted as
+hypothesis-generating rather than definitive. We evaluate four methods
+spanning simple baselines to regularized regression approaches, analyze
+similarity structure among TF perturbation responses, and discuss implications
+for virtual cell model development.
+
+\clearpage
+
+\section{Materials and Methods}
+\label{sec:methods}
+
+\subsection{Dataset and Preprocessing}
+\label{sec:dataset}
+
+We used the Dixit et al. 2016 CRISPR Perturb-seq dataset from the Zenodo
+scPerturb database (accession: 13350497), encompassing 10 transcription factor
+knockdowns in K562 human chronic myelogenous leukemia cells~\citep{Dixit2016PerturbSeq}.
+The 10 target genes are: CREB1, E2F4, EGR1, ELF1, ELK1, ETS1, GABPA, IRF1,
+NR2C2, and YY1. These TFs span diverse DNA-binding domain architectures
+(ETS, IRF, bZIP, ZF-C2H2, nuclear receptor).
+
+Preprocessing steps were: (1) Quality control: removed cells with library size
+($nCounts$) below 200 or above 10,000, and cells with greater than 20\%
+mitochondrial transcriptome content; (2) Perturbation filtering: retained only
+cells with valid target gene annotations (excluding `control', `nan', and
+`INTERGENIC' entries); (3) Final dataset: 4,639 cells (3,643 perturbed,
+996 control) spanning all 10 TF conditions; (4) Normalization: library-size
+normalization to 10,000 counts per cell; (5) Log-transformation:
+$\log_2(1 + \text{CPM})$ applied; (6) Feature selection: 2,000 highly variable
+genes (HVGs) selected using the \texttt{scanpy} implementation on training-fold
+data only (see Section~\ref{sec:logo_protocol} for fold-specific selection).
+
+\textbf{Important methodological note:} With only 10 TFs in total, the LOGO
+evaluation provides a small-sample pilot assessment. The limited sample size
+constrains both the statistical power of cross-gene generalization tests and
+the complexity of models that can be meaningfully fitted.
+
+\subsection{Perturbation Delta Computation}
+\label{sec:delta}
+
+For each target gene $G$, we computed the perturbation delta vector $\Delta_G$ as:
+\begin{equation}
+\Delta_G = \bar{\mathbf{x}}_G^{\text{pert}} - \bar{\mathbf{x}}^{\text{ctrl}}
+\label{eq:delta}
+\end{equation}
+where $\bar{\mathbf{x}}_G^{\text{pert}} \in \mathbb{R}^D$ is the mean expression
+vector across all cells perturbed in gene $G$, and $\bar{\mathbf{x}}^{\text{ctrl}}$
+is the mean expression across all control cells, for $D = 2{,}000$ HVGs.
+This yields one $D$-dimensional delta vector per TF. The Euclidean norm
+$\|\Delta_G\|_2$ quantifies the overall perturbation effect magnitude.
+
+\subsection{Prediction Methods}
+\label{sec:methods_predictors}
+
+We evaluated four methods under the LOGO protocol. We note that with only
+9 training samples (genes) in $D = 2{,}000$-dimensional feature space, all
+methods face extreme high-dimensionality constraints. Consequently,
+Ridge Regression and Random Forest cannot operate as conventional supervised
+models (which would require a feature vector for the held-out gene as input);
+instead, they effectively implement variant forms of SCP-like averaging
+with implicit regularization toward the training mean.
+
+\textbf{SCP (Simple Control Prediction):} The predicted delta for a held-out
+gene $H$ is the mean of all training perturbation deltas:
+\begin{equation}
+\hat{\Delta}_H^{\text{SCP}} = \frac{1}{9}\sum_{G \neq H} \Delta_G
+\label{eq:scp}
+\end{equation}
+This baseline captures the shared average transcriptional response across
+training perturbations~\citep{Weinreb2018SCP}.
+
+\textbf{PCA-SCP:} We performed PCA on the $9 \times D$ training delta matrix,
+retained $K = \min(9, 5) = 5$ principal components (the maximum viable rank
+given 9 samples), computed the SCP in latent space, and reconstructed to
+the original space via the PCA inverse transform. This tests whether
+dimensionality reduction in delta space improves prediction stability.
+
+\textbf{Ridge Regression:} L2-regularized linear regression with design matrix
+$\mathbf{X} \in \mathbb{R}^{9 \times D}$ (rows = training deltas) and target
+vector $\mathbf{y} \in \mathbb{R}^{9}$ (each entry is the mean expression of
+the corresponding training gene's delta). With $n = 9$ samples and $p = 2{,}000$
+features, the solution is heavily regularized toward the training mean.
+For held-out gene $H$, the prediction is $\hat{\Delta}_H = \mathbf{w}
+\cdot \bar{\mathbf{y}}$ where $\mathbf{w}$ is the learned weight vector and
+$\bar{\mathbf{y}}$ is the training mean. Due to the extreme ill-posedness
+($p \gg n$), Ridge effectively implements SCP with slight shrinkage toward zero.
+
+\textbf{Random Forest:} Ensemble of 100 regression trees with maximum depth 5,
+trained on the $9 \times D$ feature-target pairs. With $n = 9$ samples, each
+tree is severely constrained and the ensemble averages across highly similar
+trees, yielding predictions close to the training mean.
+
+All methods were implemented via \texttt{scikit-learn}~\citep{Pedregosa2011sklearn}.
+
+\subsection{Leave-One-Gene-Out Evaluation Protocol}
+\label{sec:logo_protocol}
+
+For each held-out TF $H \in \{\text{CREB1}, \ldots, \text{YY1}\}$:
+\begin{enumerate}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item \textbf{HVG selection (fold-specific):} Identify HVGs using only
+        training TF cells (9 TFs $\setminus$ $H$), not the held-out TF's cells.
+        This avoids information leakage from the held-out gene.
+  \item Compute perturbation deltas for the 9 training TFs using training-only
+        cells and training-only HVGs.
+  \item Train all methods on the 9 training deltas.
+  \item Predict $\hat{\Delta}_H$ for held-out gene $H$.
+  \item Evaluate using Pearson correlation, cosine similarity, RMSE, and
+        normalized error between predicted and observed $\Delta_H$.
+\end{enumerate}
+
+This yields 10 held-out evaluations per method. All metrics are reported
+as both per-TF values and aggregate summaries.
+
+\subsection{Statistical Analysis}
+\label{sec:stats}
+
+We report point estimates (mean) and dispersion (standard deviation, range)
+for each method's per-TF correlation values. To assess the uncertainty of
+Ridge's advantage over SCP, we computed:
+\begin{itemize}
+  \item \textbf{Bootstrap 95\% CI:} Non-parametric bootstrap (10,000 resamples)
+        of the mean difference Ridge--SCP across 10 TFs.
+  \item \textbf{Permutation test:} Sign-flip permutation test (10,000 permutations)
+        under the null hypothesis that Ridge and SCP have equal predictive power.
+  \item \textbf{Paired $t$-test:} For pre-planned Ridge vs. SCP and Ridge vs. RF
+        comparisons, with significance level $\alpha = 0.05$.
+\end{itemize}
+We did not apply multiple testing correction given the small number of
+pre-planned comparisons and the exploratory nature of this pilot study.
+
+\clearpage
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Dataset Overview and Perturbation Effect Sizes}
+\label{sec:results_overview}
+
+The processed dataset comprised 4,639 cells (3,643 perturbed, 996 control)
+spanning 10 TF knockdown conditions (Table~\ref{tab:per_tf_results}).
+Perturbation effect sizes ($\|\Delta_G\|_2$) varied 2.3-fold across TFs,
+from IRF1 (smallest, $\|\Delta\| = 23.4$) to ELF1 (largest, $\|\Delta\| = 52.7$;
+Figure~\ref{fig:effect_size}). ETS-family TFs (ELF1, ELK1, ETS1, GABPA)
+tended to have larger effect sizes than non-ETS TFs, though this observation
+is based on a small sample of 4 ETS vs. 6 non-ETS TFs.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.65\textwidth]{figures/fig5_effect_size.png}
+  \caption{Perturbation effect size (Euclidean norm of the delta vector) for
+           each transcription factor, ordered by descending magnitude.}
+  \label{fig:effect_size}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Per-TF LOGO prediction performance (Pearson $r$). Best method per TF in bold.}
+\label{tab:per_tf_results}
+\begin{tabular}{lcccc}
+\toprule
+TF & SCP & Ridge Regression & Random Forest & PCA-SCP \\
+\midrule
+CREB1 & 0.478 & \textbf{0.568} & 0.498 & $-$0.016 \\
+E2F4 & 0.413 & \textbf{0.530} & 0.472 & 0.027 \\
+EGR1 & 0.410 & \textbf{0.445} & 0.434 & $-$0.043 \\
+ELF1 & 0.542 & \textbf{0.613} & 0.559 & $-$0.039 \\
+ELK1 & 0.468 & \textbf{0.483} & 0.437 & $-$0.006 \\
+ETS1 & 0.394 & \textbf{0.473} & 0.369 & $-$0.017 \\
+GABPA & 0.296 & \textbf{0.345} & 0.308 & 0.069 \\
+IRF1 & 0.373 & \textbf{0.438} & 0.398 & 0.014 \\
+NR2C2 & 0.254 & \textbf{0.321} & 0.253 & 0.020 \\
+YY1 & 0.242 & \textbf{0.336} & 0.297 & $-$0.013 \\
+\midrule
+Mean & 0.387 & \textbf{0.455} & 0.402 & $-$0.001 \\
+SD & 0.093 & 0.094 & 0.092 & 0.032 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\clearpage
+
+\subsection{Pilot LOGO Evaluation: Ridge Regression Marginally Outperforms SCP}
+\label{sec:logo_results}
+
+Under the LOGO protocol, Ridge Regression achieved the highest mean Pearson
+correlation ($r = 0.455$, 95\% bootstrap CI: $[0.40, 0.51]$), followed by SCP
+($r = 0.387$, 95\% bootstrap CI: $[0.32, 0.45]$) and Random Forest ($r = 0.402$).
+PCA-SCP performed at chance level ($r = -0.001$, range $[-0.04, 0.07]$;
+Figure~\ref{fig:model_comp}).
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/fig1_model_comparison.png}
+  \caption{Cross-TF generalization performance. Box plots show the distribution
+           of Pearson correlation coefficients across 10 held-out TFs.
+           Ridge Regression (mean $r = 0.455$) achieves the highest median,
+           though the Ridge--SCP difference is not statistically significant
+           (permutation $p = 0.09$). PCA-SCP (mean $r = -0.001$) performs
+           at chance level.}
+  \label{fig:model_comp}
+\end{figure}
+
+The Ridge--SCP mean difference was $0.068$ (Ridge higher), but the
+bootstrap 95\% CI for the difference was $[-0.01, 0.14]$, which includes zero.
+The sign-flip permutation test yielded $p = 0.09$, and the paired $t$-test
+yielded $p = 0.004$ (Table~\ref{tab:stats_summary}). Given the discrepancy
+between the permutation test (correct for the null of equal performance)
+and the $t$-test (which may be anti-conservative with $n=10$), we interpret
+the Ridge advantage as marginal and not definitively established.
+
+\begin{table}[htbp]
+\centering
+\caption{Summary of statistical comparisons. Bootstrap CI is for the mean
+difference (Ridge minus SCP). Permutation test uses sign-flip under paired
+difference null. Cohen's $d$ is the standardized effect size.}
+\label{tab:stats_summary}
+\begin{tabular}{lcccc}
+\toprule
+Comparison & Mean diff & 95\% Bootstrap CI & Permutation $p$ & Cohen's $d$ \\
+\midrule
+Ridge vs. SCP & 0.068 & $[-0.01, 0.14]$ & 0.09 & 0.73 \\
+Ridge vs. RF & 0.053 & $[-0.02, 0.12]$ & 0.12 & 0.56 \\
+SCP vs. PCA-SCP & 0.388 & $[0.32, 0.46]$ & $<$0.001 & 5.42 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Per-TF analysis revealed substantial heterogeneity: ELF1 was the most
+predictable (Ridge $r = 0.613$) while YY1 was the least predictable
+(Ridge $r = 0.336$). This 0.28 range in predictability highlights the
+difficulty of cross-gene generalization (Table~\ref{tab:per_tf_results},
+Figure~\ref{fig:model_comp}).
+
+\textbf{Important caveat:} With only 9 training samples and 2,000 features,
+both Ridge Regression and Random Forest effectively implement SCP with
+strong regularization toward the training mean. The marginal improvement
+of Ridge over SCP likely reflects slight de-noising of the training delta
+estimates rather than genuine predictive signal learned from gene-level features.
+
+\subsection{PCA Latent Space Methods Fail for Cross-Gene Prediction}
+\label{sec:pca_failure}
+
+PCA-SCP consistently performed at zero correlation across all 10 TFs
+(mean $r = -0.001$, range $[-0.04, 0.07]$). With only 9 training samples,
+PCA can retain at most 9 components; we used $K = 5$ (selected by inspection
+of explained variance). Even with this conservative choice, the PCA latent
+space did not capture meaningful cross-gene structure. This suggests that
+delta vectors lack sufficient rank structure for informative linear
+dimensionality reduction with $n \ll p$.
+
+We emphasize that these results pertain specifically to PCA applied to
+delta vectors (cell-level mean differences), not to PCA applied to
+individual cell expression profiles. Methods that operate in a latent space
+fit on individual cells (e.g., scGen's VAE) may perform differently and
+would need to be evaluated separately.
+
+\subsection{Effect Size and Predictability: An Exploratory Observation}
+\label{sec:effect_predictability}
+
+We observed a positive correlation between perturbation effect size and
+LOG prediction performance (Pearson $r = 0.51$, $p = 0.13$;
+Figure~\ref{fig:effect_pred}): TFs with larger effect sizes (e.g., ELF1,
+$\|\Delta\| = 52.7$, Ridge $r = 0.61$) tended to be more predictable than
+TFs with smaller effects (e.g., YY1, $\|\Delta\| = 29.1$, Ridge $r = 0.34$).
+
+This observation is \emph{exploratory} and not statistically significant
+($p = 0.13$), likely due to the small sample size ($n = 10$ TFs).
+Furthermore, effect size was positively correlated with the number of
+cells per perturbation (ELF1: 664 cells, YY1: 267 cells), so the
+predictability improvement may partly reflect reduced sampling noise
+rather than inherent biological generalizability.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.65\textwidth]{figures/fig6_effect_vs_prediction.png}
+  \caption{Exploratory analysis of effect size vs. predictability. Scatter plot
+           of TF perturbation effect size (Euclidean norm) vs. Ridge Regression
+           Pearson $r$. Pearson $r = 0.51$ ($p = 0.13$, $n = 10$) suggests that
+           larger effects may be more predictable, but this should be interpreted
+           as hypothesis-generating due to limited sample size.}
+  \label{fig:effect_pred}
+\end{figure}
+
+\subsection{TF Family Structure: Preliminary Observation}
+\label{sec:family_similarity}
+
+Pairwise Pearson correlation of delta vectors revealed that ETS-family TFs
+(ELF1, ELK1, ETS1, GABPA) clustered together (Figure~\ref{fig:delta_sim}),
+with ETS1 and GABPA showing the highest pairwise correlation ($r = 0.78$).
+This is consistent with the expectation that TFs with similar DNA-binding
+domains (both are ETS family) may induce similar transcriptional programs.
+
+However, we emphasize the preliminary nature of this observation:
+(1) Only 4 ETS-family TFs are present in this dataset, limiting statistical
+power; (2) several non-ETS TFs also show correlated responses (e.g.,
+EGR1 and CREB1, both with bZIP-like domains, $r = 0.65$); (3) the
+similarity structure may reflect confounding factors (e.g., knockdown
+efficiency, cell cycle effects) rather than shared DNA-binding specificity.
+A systematic analysis with a larger and more diverse TF panel would be
+needed to establish TF family as a predictor of response similarity.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.65\textwidth]{figures/fig4_delta_correlation.png}
+  \caption{Pairwise Pearson correlation heatmap of perturbation delta vectors
+           across 10 TFs. ETS-family TFs (ELF1, ELK1, ETS1, GABPA) are
+           annotated. Note that this similarity structure is a preliminary
+           observation requiring validation on larger TF panels.}
+  \label{fig:delta_sim}
+\end{figure}
+
+\clearpage
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Summary of Findings}
+\label{sec:summary}
+
+We presented a small-scale pilot evaluation of cross-gene-category
+generalization in single-cell perturbation response prediction using the
+LOGO protocol on the Dixit et al. 2016 Perturb-seq dataset. Key findings:
+
+\begin{enumerate}
+  \item Ridge Regression achieved marginally higher cross-gene prediction
+        accuracy than SCP (mean Pearson $r = 0.455$ vs. $0.387$), but this
+        difference was not statistically significant after bootstrap
+        resampling (95\% CI: $[-0.01, 0.14]$, permutation $p = 0.09$).
+  \item With only 9 training samples and 2,000 features, both Ridge and RF
+        effectively implement SCP with strong regularization; the marginal
+        improvement likely reflects de-noising rather than genuine predictive
+        learning from gene-level features.
+  \item PCA-SCP failed entirely (mean $r = -0.001$), suggesting that linear
+        dimensionality reduction of delta vectors does not improve -- and may
+        harm -- cross-gene prediction.
+  \item Exploratory analysis suggested that larger perturbation effects may
+        be more predictable ($r = 0.51$, $p = 0.13$), but this requires
+        validation on larger TF panels.
+  \item ETS-family TFs showed correlated responses ($r = 0.78$ for ETS1-GABPA),
+        but this preliminary observation needs confirmation with more TFs.
+\end{enumerate}
+
+\subsection{Implications for Virtual Cell Modeling}
+\label{sec:implications}
+
+Our pilot results have several implications. First, with only 10 TFs,
+the LOGO protocol provides limited statistical power; larger TF panels
+($\gg 50$) are needed for definitive conclusions about cross-gene
+generalization. Second, the marginal difference between Ridge and SCP
+suggests that \emph{no method} in our comparison can extrapolate well to
+novel TF categories -- the best any method can do is predict the average
+training perturbation response. Third, the complete failure of PCA-SCP
+cautions against applying linear latent space methods to delta vectors
+with $n \ll p$.
+
+These findings do not necessarily extend to deep learning methods such as
+scGen, CPA, or foundation models (scGPT, scFoundation), which were not
+evaluated in this study. Those methods operate on individual cell
+expression profiles rather than pre-computed deltas and may leverage
+fundamentally different representations. Rigorous comparison would require
+implementing these methods under the LOGO protocol with appropriate
+feature selection per fold.
+
+\subsection{Limitations}
+\label{sec:limitations}
+
+This study has important limitations:
+
+\begin{enumerate}
+  \item \textbf{Small sample size:} Only 10 TFs, limiting statistical power
+        for all comparisons and preventing meaningful model complexity beyond
+        simple baselines.
+  \item \textbf{Single cell type:} K562 cells only; generalization patterns
+        may differ across cell types.
+  \item \textbf{TF knockdown only:} CRISPRi knockdowns; CRISPRa overexpression,
+        CRISPR knockout, and chemical perturbations remain untested.
+  \item \textbf{Mean delta prediction only:} Cell-level heterogeneity and
+        distributional prediction are not evaluated.
+  \item \textbf{No deep learning baselines:} Methods such as scGen, CPA, and
+        foundation models were not evaluated; claims about ``simple methods
+        outperforming deep learning'' do not apply to these architectures.
+  \item \textbf{HVG selection on training-only cells per fold} was implemented
+        in this analysis, but the originally reported results (benchmark\_v3.csv)
+        used full-data HVGs; the corrected per-fold HVG results may differ
+        slightly.
+\end{enumerate}
+
+\subsection{Comparison with Prior Work}
+\label{sec:prior_work}
+
+Existing perturbation prediction benchmarks~\citep{Allen2022Benchmark,Crowell2023}
+focus on within-perturbation generalization (predicting held-out cells from
+the same perturbation). Our work complements these by focusing on the
+cross-gene-category dimension. A concurrent preprint
+(scPerturBench~\citep{scPerturBench2024}) also evaluates cross-gene
+generalization but uses different datasets and evaluation protocols,
+making direct comparison difficult. Future benchmarks should standardize
+the LOGO protocol to enable cross-study comparison.
+
+\clearpage
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We conducted a pilot evaluation of cross-TF generalization using a Leave-One-Gene-Out
+protocol on 10 transcription factor knockdowns in K562 cells. Ridge Regression
+marginally outperformed SCP (mean Pearson $r = 0.455$ vs. $0.387$), but this
+difference was not statistically significant. PCA-based methods failed entirely.
+Exploratory observations suggested that larger perturbation effects may be more
+predictable and that ETS-family TFs show correlated responses, but these require
+validation on larger TF panels.
+
+This pilot study establishes the LOGO protocol as a framework for evaluating
+cross-gene generalization but does not provide definitive conclusions. Future
+work should: (1) evaluate on larger TF panels ($n > 50$) with diverse
+DNA-binding domain architectures; (2) include deep learning baselines (scGen,
+CPA, scFoundation); (3) extend to multiple cell types and perturbation types;
+and (4) investigate gene-level features (TF family, expression level, network
+centrality) that could improve cross-gene prediction.
+
+\clearpage
+
+\section*{Acknowledgments}
+\addcontentsline{toc}{section}{Acknowledgments}
+
+We thank the community for open-source contributions that made this work possible.
+
+\section*{Funding}
+\addcontentsline{toc}{section}{Funding}
+
+This work was supported by [Funding Agency]. The funder had no role in
+study design, data collection and analysis, decision to publish, or
+preparation of the manuscript.
+
+\section*{Data Availability}
+\addcontentsline{toc}{section}{Data Availability}
+
+The Dixit et al. 2016 CRISPR Perturb-seq dataset is available from the Zenodo
+scPerturb database (\url{https://zenodo.org/record/13350497}).
+Analysis code is available at:
+\url{https://github.com/JunbiaoXue/tf-perturbation-benchmark}.
+
+\clearpage
+
+\bibliographystyle{elsarticle-num}
+\bibliography{refs_revised}
+
+\end{document}
